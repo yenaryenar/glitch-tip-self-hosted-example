@@ -1,0 +1,96 @@
+version: '3.8'
+
+x-environment: &default-environment
+  DATABASE_URL: postgres://glitchtip:${POSTGRES_PASSWORD:-glitchtip_password}@postgres:5432/glitchtip
+  SECRET_KEY: ${SECRET_KEY:-change_me_to_something_very_random_and_long}
+  ENABLE_ORGANIZATION_CREATION: "${ENABLE_ORGANIZATION_CREATION:-true}"
+  DEBUG: "${DEBUG:-false}"
+  EMAIL_BACKEND: "${EMAIL_BACKEND:-django.core.mail.backends.smtp.EmailBackend}"
+  EMAIL_HOST: "${EMAIL_HOST:-localhost}"
+  EMAIL_PORT: "${EMAIL_PORT:-25}"
+  EMAIL_HOST_USER: "${EMAIL_HOST_USER:-}"
+  EMAIL_HOST_PASSWORD: "${EMAIL_HOST_PASSWORD:-}"
+  EMAIL_USE_TLS: "${EMAIL_USE_TLS:-false}"
+  DEFAULT_FROM_EMAIL: "${DEFAULT_FROM_EMAIL:-webmaster@localhost}"
+  GLITCHTIP_DOMAIN: "${GLITCHTIP_DOMAIN:-http://localhost:8000}"
+  CELERY_WORKER_CONCURRENCY: "${CELERY_WORKER_CONCURRENCY:-2}"
+  CELERY_WORKER_PREFETCH_MULTIPLIER: "${CELERY_WORKER_PREFETCH_MULTIPLIER:-4}"
+  CELERY_WORKER_POOL: "${CELERY_WORKER_POOL:-threads}"
+  REDIS_URL: "redis://redis:6379/0"
+  PORT: 8000
+
+x-depends_on: &default-depends_on
+  postgres:
+    condition: service_healthy
+  redis:
+    condition: service_started
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: glitchtip
+      POSTGRES_USER: glitchtip
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-glitchtip_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U glitchtip -d glitchtip"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: valkey/valkey:8
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    command: valkey-server --appendonly yes
+
+  migrate:
+    image: glitchtip/glitchtip:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ./manage.py migrate
+    environment: *default-environment
+    volumes:
+      - uploads:/code/uploads
+
+  web:
+    image: glitchtip/glitchtip:latest
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    ports:
+      - "${PORT:-8000}:8000"
+    environment: *default-environment
+    volumes:
+      - uploads:/code/uploads
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/_health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker:
+    image: glitchtip/glitchtip:latest
+    restart: unless-stopped
+    command: ./bin/run-celery-with-beat.sh
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    environment: *default-environment
+    volumes:
+      - uploads:/code/uploads
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads:
